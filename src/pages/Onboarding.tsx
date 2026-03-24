@@ -1,12 +1,65 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { doc, updateDoc, getDoc, setDoc, addDoc, collection } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '../firebase';
+import { db, auth } from '../firebase';
 import { useAuth } from '../AuthContext';
-import { ShoppingBag, Utensils, Zap, ChevronRight, CheckCircle2, Upload, CreditCard, UserCheck, AlertCircle, Camera, RefreshCw } from 'lucide-react';
-import { calculateRiskScore, verifyAadhar, verifyBankAccount } from '../services/gemini';
-import { useRef } from 'react';
+import { ShoppingBag, Utensils, Zap, ChevronRight, CheckCircle2, CreditCard, UserCheck, AlertCircle, MapPin, Loader2, RefreshCw, CloudRain, Sun, Cloud, Wind, Droplets } from 'lucide-react';
+import { calculateRiskScore } from '../services/gemini';
+import { useRef, useEffect } from 'react';
+import { fetchWeatherByCoords, fetchWeatherByCity } from '../services/weatherService';
+import { WeatherData } from '../types';
+import { motion, AnimatePresence } from 'motion/react';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 const categories = [
   {
@@ -42,24 +95,44 @@ export const Onboarding: React.FC = () => {
     bankAccount: '',
     ifsc: '',
     age: '',
+    location: 'New Delhi',
   });
-  const [aadharFile, setAadharFile] = useState<File | null>(null);
-  const [aadharFileName, setAadharFileName] = useState<string>('');
-  const [aadharBackFile, setAadharBackFile] = useState<File | null>(null);
-  const [aadharBackFileName, setAadharBackFileName] = useState<string>('');
-  const [bankFile, setBankFile] = useState<File | null>(null);
-  const [bankFileName, setBankFileName] = useState<string>('');
-  const [livePhoto, setLivePhoto] = useState<string | null>(null);
-  const [cameraActive, setCameraActive] = useState(false);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [accountData, setAccountData] = useState({
     emailOrPhone: profile?.email || user?.email || '',
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | React.ReactNode | null>(null);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [detectingLocation, setDetectingLocation] = useState(false);
+  const [riskResult, setRiskResult] = useState<{ score: number; premium: number } | null>(null);
   const navigate = useNavigate();
+
+  const detectLocation = () => {
+    if (!navigator.geolocation) {
+      setError("Geolocation is not supported by your browser");
+      return;
+    }
+
+    setDetectingLocation(true);
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        try {
+          const data = await fetchWeatherByCoords(position.coords.latitude, position.coords.longitude);
+          setWeather(data);
+          setVerificationData(prev => ({ ...prev, location: data.city }));
+        } catch (err: any) {
+          setError(err.message || "Failed to detect location weather");
+        } finally {
+          setDetectingLocation(false);
+        }
+      },
+      (err) => {
+        setError("Location access denied. Please enter your city manually.");
+        setDetectingLocation(false);
+      }
+    );
+  };
 
   const handleCategorySelect = (catId: string) => {
     setSelectedCategory(catId);
@@ -76,89 +149,6 @@ export const Onboarding: React.FC = () => {
     setStep(4);
   };
 
-  const startCamera = async () => {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setError("Your browser does not support camera access. Please use a modern browser.");
-      return;
-    }
-
-    setCameraActive(true);
-    setError(null);
-
-    try {
-      // Try with facingMode: 'user' first for front camera
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { facingMode: 'user' } 
-        });
-      } catch (e) {
-        // Fallback to any video device if 'user' fails
-        console.warn("facingMode: 'user' failed, falling back to generic video", e);
-        stream = await navigator.mediaDevices.getUserMedia({ 
-          video: true 
-        });
-      }
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-    } catch (err: any) {
-      console.error("Error accessing camera:", err);
-      
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setError(
-          <div className="flex flex-col gap-3">
-            <p><strong>Camera Permission Denied.</strong></p>
-            <p className="text-sm">To fix this:</p>
-            <ol className="text-xs text-left list-decimal pl-4 space-y-1">
-              <li>Click the <strong>lock icon</strong> in your browser's address bar.</li>
-              <li>Change Camera to <strong>"Allow"</strong>.</li>
-              <li>Refresh this page.</li>
-            </ol>
-            <div className="mt-2 pt-2 border-t border-white/10">
-              <p className="text-xs mb-2">Still having trouble? The preview window might be blocking access.</p>
-              <a 
-                href={window.location.href} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="inline-block bg-white/20 hover:bg-white/30 text-white text-xs font-bold py-2 px-4 rounded-lg transition-colors"
-              >
-                Open App in New Tab
-              </a>
-            </div>
-          </div>
-        );
-      } else {
-        setError("Could not access camera. Please ensure no other app is using your camera and try again.");
-      }
-      setCameraActive(false);
-    }
-  };
-
-  const takePhoto = () => {
-    if (videoRef.current && canvasRef.current) {
-      const context = canvasRef.current.getContext('2d');
-      if (context) {
-        canvasRef.current.width = videoRef.current.videoWidth;
-        canvasRef.current.height = videoRef.current.videoHeight;
-        context.drawImage(videoRef.current, 0, 0);
-        const data = canvasRef.current.toDataURL('image/jpeg');
-        setLivePhoto(data);
-        stopCamera();
-      }
-    }
-  };
-
-  const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-    }
-    setCameraActive(false);
-  };
-
   const handleFinalSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user) return;
@@ -166,152 +156,184 @@ export const Onboarding: React.FC = () => {
       setError('Please accept the Terms and Conditions to proceed.');
       return;
     }
+    
+    setLoading(true);
+    setError(null);
+    try {
+      let currentWeather = weather;
+      if (!currentWeather) {
+        try {
+          currentWeather = await fetchWeatherByCity(verificationData.location);
+        } catch (e) {
+          console.warn("Could not fetch weather for risk calculation", e);
+        }
+      }
 
-    if (!livePhoto) {
-      setError('Please take a live photo for identity verification.');
-      return;
+      const result = await calculateRiskScore(
+        verificationData.location || "New Delhi", 
+        currentWeather || { temp: 32, humidity: 80, forecast: "Clear" }
+      );
+      setRiskResult(result);
+      setStep(5);
+    } catch (err) {
+      console.error(err);
+      setError('Failed to calculate risk profile. Please try again.');
+    } finally {
+      setLoading(false);
     }
+  };
 
+  const handlePayment = async () => {
+    if (!user || !profile || !riskResult) return;
     setLoading(true);
     setError(null);
 
+    try {
+      const [orderRes, keyRes] = await Promise.all([
+        fetch('/api/payment/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            amount: riskResult.premium, // in INR
+            receipt: `receipt_${user.uid}_${Date.now()}`,
+          }),
+        }),
+        fetch('/api/payment/key').then(r => r.json())
+      ]);
+
+      if (!orderRes.ok) throw new Error('Failed to create payment order');
+      const order = await orderRes.json();
+      
+      if (keyRes.error) {
+        setError(keyRes.error);
+        setLoading(false);
+        return;
+      }
+      const { key } = keyRes;
+
+      // 3. Open Razorpay Checkout
+      const options = {
+        key,
+        amount: order.amount,
+        currency: order.currency,
+        name: "ErgoShield Insurance",
+        description: "Weekly Insurance Premium",
+        order_id: order.id,
+        handler: async (response: any) => {
+          // 4. Verify Payment
+          const verifyResponse = await fetch('/api/payment/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(response),
+          });
+
+          if (verifyResponse.ok) {
+            await finalizeOnboarding(riskResult);
+          } else {
+            setError('Payment verification failed. Please contact support.');
+          }
+        },
+        prefill: {
+          name: profile.fullName,
+          email: profile.email,
+          contact: profile.phoneNumber,
+        },
+        theme: {
+          color: "#059669",
+        },
+      };
+
+      const rzp = new (window as any).Razorpay(options);
+      rzp.on('payment.failed', function (response: any) {
+        setError(`Payment failed: ${response.error.description}`);
+        setLoading(false);
+      });
+      rzp.open();
+    } catch (err) {
+      console.error(err);
+      setError('Payment initialization failed. Please try again.');
+      setLoading(false);
+    }
+  };
+
+  const finalizeOnboarding = async (riskResult: any) => {
+    if (!user) return;
     try {
       // 1. Check for duplicates using index collection
       const aadharIndexRef = doc(db, 'indices', `aadhar_${verificationData.aadharNumber}`);
       const bankIndexRef = doc(db, 'indices', `bank_${verificationData.bankAccount}`);
       
-      const [aadharSnap, bankSnap] = await Promise.all([
-        getDoc(aadharIndexRef),
-        getDoc(bankIndexRef)
-      ]);
+      let aadharSnap, bankSnap;
+      try {
+        [aadharSnap, bankSnap] = await Promise.all([
+          getDoc(aadharIndexRef),
+          getDoc(bankIndexRef)
+        ]);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `indices/aadhar_${verificationData.aadharNumber} or bank_${verificationData.bankAccount}`);
+      }
 
-      if (aadharSnap.exists() && aadharSnap.data().ownerId !== user.uid) {
+      if (aadharSnap?.exists() && aadharSnap.data().ownerId !== user.uid) {
         setError('This Aadhar number is already registered with another account.');
         setLoading(false);
         return;
       }
 
-      if (bankSnap.exists() && bankSnap.data().ownerId !== user.uid) {
+      if (bankSnap?.exists() && bankSnap.data().ownerId !== user.uid) {
         setError('This Bank account is already registered with another account.');
         setLoading(false);
         return;
       }
 
-      // 2. AI Verification of Aadhar Card
-      if (!aadharFile || !aadharBackFile) {
-        setError('Please upload both front and back pages of your Aadhar card.');
-        setLoading(false);
-        return;
+      // 3. Update User Profile
+      try {
+        await updateDoc(doc(db, 'users', user.uid), {
+          category: selectedCategory,
+          subCategory: selectedSub,
+          aadharNumber: verificationData.aadharNumber,
+          bankAccountNumber: verificationData.bankAccount,
+          ifscCode: verificationData.ifsc,
+          age: parseInt(verificationData.age),
+          location: verificationData.location,
+          riskScore: riskResult.score,
+          weeklyPremium: riskResult.premium,
+          onboarded: true,
+          aadharVerified: true,
+          bankVerified: true
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
       }
-
-      if (!bankFile) {
-        setError('Please upload your bank document (passbook/cancelled cheque).');
-        setLoading(false);
-        return;
-      }
-
-      // Convert files to base64 for Gemini
-      const fileToBase64 = (file: File) => new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve((reader.result as string).split(',')[1]);
-        reader.readAsDataURL(file);
-      });
-
-      const [aadharBase64, bankBase64] = await Promise.all([
-        fileToBase64(aadharFile),
-        fileToBase64(bankFile)
-      ]);
-
-      // Verify Aadhar Front
-      const aadharResult = await verifyAadhar(
-        verificationData.aadharNumber,
-        aadharBase64,
-        aadharFile.type
-      );
-
-      if (!aadharResult.verified) {
-        setError(`Aadhar Verification Failed: ${aadharResult.reason}`);
-        setLoading(false);
-        return;
-      }
-
-      // Verify Bank Account
-      const bankResult = await verifyBankAccount(
-        verificationData.bankAccount,
-        bankBase64,
-        bankFile.type
-      );
-
-      if (!bankResult.verified) {
-        setError(`Bank Verification Failed: ${bankResult.reason}`);
-        setLoading(false);
-        return;
-      }
-
-      // 3. Upload All Files to Storage
-      const uploadFile = async (file: File, path: string) => {
-        const fileRef = ref(storage, `${path}/${user.uid}_${Date.now()}_${file.name}`);
-        const result = await uploadBytes(fileRef, file);
-        return getDownloadURL(result.ref);
-      };
-
-      const uploadBase64 = async (base64: string, path: string) => {
-        const fileRef = ref(storage, `${path}/${user.uid}_${Date.now()}.jpg`);
-        const blob = await (await fetch(base64)).blob();
-        const result = await uploadBytes(fileRef, blob);
-        return getDownloadURL(result.ref);
-      };
-
-      const [aadharUrl, aadharBackUrl, bankUrl, livePhotoUrl] = await Promise.all([
-        uploadFile(aadharFile, 'aadhar_front'),
-        uploadFile(aadharBackFile, 'aadhar_back'),
-        uploadFile(bankFile, 'bank_docs'),
-        uploadBase64(livePhoto, 'live_photos')
-      ]);
-
-      // 4. Simulate AI Risk Profiling
-      const riskResult = await calculateRiskScore("Mumbai, India", { temp: 32, humidity: 80, forecast: "Heavy Rain" });
-      
-      // 5. Update User Profile
-      await updateDoc(doc(db, 'users', user.uid), {
-        category: selectedCategory,
-        subCategory: selectedSub,
-        aadharNumber: verificationData.aadharNumber,
-        aadharCardUrl: aadharUrl,
-        aadharBackUrl: aadharBackUrl,
-        bankAccountNumber: verificationData.bankAccount,
-        bankDocUrl: bankUrl,
-        livePhotoUrl: livePhotoUrl,
-        ifscCode: verificationData.ifsc,
-        age: parseInt(verificationData.age),
-        riskScore: riskResult.score,
-        weeklyPremium: riskResult.premium,
-        onboarded: true,
-        aadharVerified: true,
-        bankVerified: true
-      });
 
       // 5.1 Create Active Policy
       const startDate = new Date();
       const endDate = new Date();
       endDate.setFullYear(startDate.getFullYear() + 1); // 1 year policy
 
-      await addDoc(collection(db, 'policies'), {
-        userId: user.uid,
-        status: 'active',
-        startDate: startDate.toISOString(),
-        endDate: endDate.toISOString(),
-        premiumAmount: riskResult.premium,
-        coverageAmount: 50000, // Default coverage
-      });
+      try {
+        await addDoc(collection(db, 'policies'), {
+          userId: user.uid,
+          status: 'active',
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+          premiumAmount: riskResult.premium,
+          coverageAmount: 50000, // Default coverage
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.CREATE, 'policies');
+      }
 
       // 6. Create Indices for uniqueness
-      await Promise.all([
-        setDoc(aadharIndexRef, { ownerId: user.uid, type: 'aadhar' }),
-        setDoc(bankIndexRef, { ownerId: user.uid, type: 'bank' })
-      ]);
+      try {
+        await Promise.all([
+          setDoc(aadharIndexRef, { ownerId: user.uid, type: 'aadhar' }),
+          setDoc(bankIndexRef, { ownerId: user.uid, type: 'bank' })
+        ]);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, 'indices');
+      }
 
-      setStep(5);
+      setStep(6);
     } catch (err) {
       console.error(err);
       setError('An error occurred during verification. Please try again.');
@@ -325,7 +347,7 @@ export const Onboarding: React.FC = () => {
       <div className="max-w-2xl w-full bg-white rounded-3xl shadow-xl p-8 border border-neutral-100">
         {/* Progress Bar */}
         <div className="flex gap-2 mb-12">
-          {[1, 2, 3, 4, 5].map((s) => (
+          {[1, 2, 3, 4, 5, 6].map((s) => (
             <div
               key={s}
               className={`h-2 flex-1 rounded-full transition-all ${
@@ -391,12 +413,24 @@ export const Onboarding: React.FC = () => {
         {step === 3 && (
           <div className="animate-in fade-in slide-in-from-right-4 duration-500">
             <h2 className="text-3xl font-bold text-neutral-900 mb-2">Verification</h2>
-            <p className="text-neutral-500 mb-8">We need some details to verify your identity</p>
+            <p className="text-neutral-500 mb-6">We need some details to verify your identity</p>
+            
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-8 flex items-start gap-3">
+              <AlertCircle className="text-amber-600 mt-1 shrink-0" size={20} />
+              <div>
+                <p className="text-amber-900 font-bold text-sm mb-1">Important Document Instructions</p>
+                <p className="text-amber-800 text-xs leading-relaxed">
+                  Please ensure you provide the <strong>correct Aadhar Number</strong> and <strong>Bank Passbook details</strong>. 
+                  Mismatched information will lead to claim rejection.
+                </p>
+              </div>
+            </div>
+
             <form onSubmit={handleVerificationContinue} className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label className="block text-sm font-semibold text-neutral-700 mb-2">Aadhar Number</label>
-                  <div className="relative">
+                  <div className="relative mb-3">
                     <UserCheck className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-400" size={20} />
                     <input
                       type="text"
@@ -407,11 +441,27 @@ export const Onboarding: React.FC = () => {
                       onChange={(e) => setVerificationData({ ...verificationData, aadharNumber: e.target.value })}
                     />
                   </div>
+                  <div className="relative">
+                    <input
+                      type="file"
+                      className="hidden"
+                      id="aadhar-upload"
+                      accept="image/*,.pdf"
+                    />
+                    <label 
+                      htmlFor="aadhar-upload"
+                      className="flex items-center justify-center gap-2 w-full py-3 border-2 border-dashed border-neutral-200 rounded-xl text-xs font-bold text-neutral-500 hover:border-emerald-500 hover:text-emerald-600 cursor-pointer transition-all"
+                    >
+                      <Zap size={14} /> Upload Aadhar Card
+                    </label>
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-neutral-700 mb-2">Age</label>
                   <input
                     type="number"
+                    min="18"
+                    max="100"
                     required
                     placeholder="25"
                     className="w-full px-4 py-3 bg-neutral-50 border border-neutral-200 rounded-xl focus:ring-2 focus:ring-emerald-500"
@@ -419,12 +469,59 @@ export const Onboarding: React.FC = () => {
                     onChange={(e) => setVerificationData({ ...verificationData, age: e.target.value })}
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-semibold text-neutral-700 mb-2">Location</label>
+                  <div className="relative mb-2">
+                    <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-400" size={20} />
+                    <input
+                      type="text"
+                      required
+                      placeholder="New Delhi"
+                      className="w-full pl-12 pr-24 py-3 bg-neutral-50 border border-neutral-200 rounded-xl focus:ring-2 focus:ring-emerald-500"
+                      value={verificationData.location}
+                      onChange={(e) => setVerificationData({ ...verificationData, location: e.target.value })}
+                    />
+                    <button
+                      type="button"
+                      onClick={detectLocation}
+                      disabled={detectingLocation}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-lg text-xs font-bold hover:bg-emerald-100 transition-colors disabled:opacity-50 flex items-center gap-1"
+                    >
+                      {detectingLocation ? <RefreshCw size={12} className="animate-spin" /> : <MapPin size={12} />}
+                      Detect
+                    </button>
+                  </div>
+                  
+                  <AnimatePresence>
+                    {weather && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="bg-emerald-50/50 border border-emerald-100 rounded-xl p-3 flex items-center justify-between"
+                      >
+                        <div className="flex items-center gap-3">
+                          <img src={weather.icon} alt={weather.condition} className="w-8 h-8" />
+                          <div>
+                            <div className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">{weather.condition}</div>
+                            <div className="text-xs font-medium text-emerald-900">{weather.temp}°C in {weather.city}</div>
+                          </div>
+                        </div>
+                        {weather.isRisk && (
+                          <div className="flex items-center gap-1 text-red-500 font-bold text-[10px] bg-red-50 px-2 py-1 rounded-full border border-red-100">
+                            <AlertCircle size={10} />
+                            HIGH RISK
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label className="block text-sm font-semibold text-neutral-700 mb-2">Bank Account Number</label>
-                  <div className="relative">
+                  <div className="relative mb-3">
                     <CreditCard className="absolute left-4 top-1/2 -translate-y-1/2 text-neutral-400" size={20} />
                     <input
                       type="text"
@@ -434,6 +531,20 @@ export const Onboarding: React.FC = () => {
                       value={verificationData.bankAccount}
                       onChange={(e) => setVerificationData({ ...verificationData, bankAccount: e.target.value })}
                     />
+                  </div>
+                  <div className="relative">
+                    <input
+                      type="file"
+                      className="hidden"
+                      id="bank-upload"
+                      accept="image/*,.pdf"
+                    />
+                    <label 
+                      htmlFor="bank-upload"
+                      className="flex items-center justify-center gap-2 w-full py-3 border-2 border-dashed border-neutral-200 rounded-xl text-xs font-bold text-neutral-500 hover:border-emerald-500 hover:text-emerald-600 cursor-pointer transition-all"
+                    >
+                      <Zap size={14} /> Upload Bank Passbook
+                    </label>
                   </div>
                 </div>
                 <div>
@@ -446,150 +557,6 @@ export const Onboarding: React.FC = () => {
                     value={verificationData.ifsc}
                     onChange={(e) => setVerificationData({ ...verificationData, ifsc: e.target.value })}
                   />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-2">
-                  <label className="block text-sm font-semibold text-neutral-700 mb-2">Aadhar Front Page</label>
-                  <div 
-                    onClick={() => document.getElementById('aadhar-upload')?.click()}
-                    className={`p-6 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center gap-2 cursor-pointer transition-all ${
-                      aadharFile ? 'bg-emerald-50 border-emerald-500' : 'bg-neutral-50 border-neutral-200 hover:bg-neutral-100'
-                    }`}
-                  >
-                    <input
-                      id="aadhar-upload"
-                      type="file"
-                      accept="image/*,.pdf"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          setAadharFile(file);
-                          setAadharFileName(file.name);
-                        }
-                      }}
-                    />
-                    {aadharFile ? (
-                      <>
-                        <CheckCircle2 className="text-emerald-500" size={32} />
-                        <p className="font-bold text-emerald-700 text-center text-xs truncate w-full">{aadharFileName}</p>
-                      </>
-                    ) : (
-                      <>
-                        <Upload className="text-neutral-400" size={32} />
-                        <p className="font-medium text-neutral-600 text-sm">Front Page</p>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="block text-sm font-semibold text-neutral-700 mb-2">Aadhar Back Page</label>
-                  <div 
-                    onClick={() => document.getElementById('aadhar-back-upload')?.click()}
-                    className={`p-6 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center gap-2 cursor-pointer transition-all ${
-                      aadharBackFile ? 'bg-emerald-50 border-emerald-500' : 'bg-neutral-50 border-neutral-200 hover:bg-neutral-100'
-                    }`}
-                  >
-                    <input
-                      id="aadhar-back-upload"
-                      type="file"
-                      accept="image/*,.pdf"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          setAadharBackFile(file);
-                          setAadharBackFileName(file.name);
-                        }
-                      }}
-                    />
-                    {aadharBackFile ? (
-                      <>
-                        <CheckCircle2 className="text-emerald-500" size={32} />
-                        <p className="font-bold text-emerald-700 text-center text-xs truncate w-full">{aadharBackFileName}</p>
-                      </>
-                    ) : (
-                      <>
-                        <Upload className="text-neutral-400" size={32} />
-                        <p className="font-medium text-neutral-600 text-sm">Back Page</p>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-neutral-700 mb-2">Bank Document (Passbook/Cheque)</label>
-                <div 
-                  onClick={() => document.getElementById('bank-upload')?.click()}
-                  className={`p-6 border-2 border-dashed rounded-2xl flex flex-col items-center justify-center gap-2 cursor-pointer transition-all ${
-                    bankFile ? 'bg-emerald-50 border-emerald-500' : 'bg-neutral-50 border-neutral-200 hover:bg-neutral-100'
-                  }`}
-                >
-                  <input
-                    id="bank-upload"
-                    type="file"
-                    accept="image/*,.pdf"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        setBankFile(file);
-                        setBankFileName(file.name);
-                      }
-                    }}
-                  />
-                  {bankFile ? (
-                    <>
-                      <CheckCircle2 className="text-emerald-500" size={32} />
-                      <p className="font-bold text-emerald-700">{bankFileName}</p>
-                    </>
-                  ) : (
-                    <>
-                      <CreditCard className="text-neutral-400" size={32} />
-                      <p className="font-medium text-neutral-600">Upload Bank Proof</p>
-                      <p className="text-xs text-neutral-400">Must show account number & name</p>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <label className="block text-sm font-semibold text-neutral-700 mb-2">Live Identity Verification</label>
-                <div className="relative bg-neutral-900 rounded-2xl overflow-hidden aspect-video flex items-center justify-center border-2 border-neutral-200">
-                  {livePhoto ? (
-                    <div className="relative w-full h-full">
-                      <img src={livePhoto} alt="Live" className="w-full h-full object-cover" />
-                      <button 
-                        onClick={() => setLivePhoto(null)}
-                        className="absolute top-4 right-4 bg-white/20 backdrop-blur-md p-2 rounded-full text-white hover:bg-white/40 transition-all"
-                      >
-                        <RefreshCw size={20} />
-                      </button>
-                    </div>
-                  ) : cameraActive ? (
-                    <div className="relative w-full h-full">
-                      <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
-                      <button 
-                        onClick={takePhoto}
-                        className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-white p-4 rounded-full shadow-xl hover:scale-110 transition-all"
-                      >
-                        <div className="w-12 h-12 rounded-full border-4 border-emerald-600" />
-                      </button>
-                    </div>
-                  ) : (
-                    <button 
-                      onClick={startCamera}
-                      className="flex flex-col items-center gap-3 text-white hover:text-emerald-400 transition-all"
-                    >
-                      <Camera size={48} />
-                      <span className="font-bold">Take Live Photo</span>
-                    </button>
-                  )}
-                  <canvas ref={canvasRef} className="hidden" />
                 </div>
               </div>
 
@@ -664,7 +631,47 @@ export const Onboarding: React.FC = () => {
           </div>
         )}
 
-        {step === 5 && (
+        {step === 5 && riskResult && (
+          <div className="animate-in fade-in slide-in-from-right-4 duration-500">
+            <h2 className="text-3xl font-bold text-neutral-900 mb-2">Activate Protection</h2>
+            <p className="text-neutral-500 mb-8">Pay your first weekly premium to activate your insurance</p>
+            
+            <div className="bg-emerald-50 rounded-2xl p-8 border border-emerald-100 mb-8">
+              <div className="flex justify-between items-center mb-6">
+                <span className="text-emerald-800 font-medium">Weekly Premium</span>
+                <span className="text-emerald-900 font-bold text-3xl">₹{riskResult.premium}</span>
+              </div>
+              <div className="space-y-3">
+                <div className="flex items-center gap-3 text-emerald-700 text-sm">
+                  <CheckCircle2 size={18} />
+                  <span>Instant coverage activation</span>
+                </div>
+                <div className="flex items-center gap-3 text-emerald-700 text-sm">
+                  <CheckCircle2 size={18} />
+                  <span>Risk Score: {riskResult.score}/100</span>
+                </div>
+                <div className="flex items-center gap-3 text-emerald-700 text-sm">
+                  <CheckCircle2 size={18} />
+                  <span>Secure payment via Razorpay</span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={handlePayment}
+              disabled={loading}
+              className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-4 rounded-xl shadow-lg shadow-emerald-200 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {loading ? <Loader2 size={20} className="animate-spin" /> : <CreditCard size={20} />}
+              Pay ₹{riskResult.premium} & Activate Now
+            </button>
+            <p className="text-center text-xs text-neutral-400 mt-4">
+              By paying, you agree to the auto-renewal of your weekly premium.
+            </p>
+          </div>
+        )}
+
+        {step === 6 && (
           <div className="text-center animate-in zoom-in duration-500">
             <div className="w-24 h-24 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-6">
               <CheckCircle2 size={64} />

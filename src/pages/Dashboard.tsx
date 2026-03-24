@@ -21,15 +21,23 @@ import {
   ChevronUp,
   Zap,
   Shield,
-  ArrowRight
+  ArrowRight,
+  Loader2,
+  AlertTriangle,
+  Gift
 } from 'lucide-react';
-
+import { WeatherWidget } from '../components/WeatherWidget';
+import { WeatherData } from '../types';
+import { motion, AnimatePresence } from 'motion/react';
 
 export const Dashboard: React.FC = () => {
   const { profile } = useAuth();
   const navigate = useNavigate();
   const [claims, setClaims] = useState<Claim[]>([]);
   const [policy, setPolicy] = useState<InsurancePolicy | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [weather, setWeather] = useState<WeatherData | null>(null);
 
   useEffect(() => {
     if (!profile?.uid) return;
@@ -64,6 +72,77 @@ export const Dashboard: React.FC = () => {
     };
   }, [profile?.uid]);
 
+  const handlePayment = async () => {
+    if (!profile?.uid) return;
+    setLoading(true);
+    setError(null);
+
+    try {
+      // 1. Get Razorpay Key & Create Order
+      const [keyRes, orderRes] = await Promise.all([
+        fetch('/api/payment/key').then(r => r.json()),
+        fetch('/api/payment/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            amount: profile.weeklyPremium || 50,
+            receipt: `receipt_dash_${profile.uid}_${Date.now()}`,
+          }),
+        })
+      ]);
+
+      if (keyRes.error) {
+        setError(keyRes.error);
+        setLoading(false);
+        return;
+      }
+      const { key } = keyRes;
+
+      if (!orderRes.ok) throw new Error('Failed to create order');
+      const order = await orderRes.json();
+
+      // 3. Open Razorpay
+      const options = {
+        key,
+        amount: order.amount,
+        currency: order.currency,
+        name: "ErgoShield Insurance",
+        description: "Weekly Premium Payment",
+        order_id: order.id,
+        handler: async (response: any) => {
+          const verifyRes = await fetch('/api/payment/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(response),
+          });
+
+          if (verifyRes.ok) {
+            // Update policy end date or create new one
+            alert('Payment successful! Your coverage has been extended.');
+          } else {
+            setError('Payment verification failed.');
+          }
+        },
+        prefill: {
+          name: profile.fullName,
+          email: profile.email,
+          contact: profile.phoneNumber,
+        },
+        theme: {
+          color: "#059669",
+        },
+      };
+
+      const rzp = new (window as any).Razorpay(options);
+      rzp.open();
+    } catch (err) {
+      console.error(err);
+      setError('Failed to initiate payment.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const stats = [
     { label: 'Total Earnings', value: '₹0', icon: IndianRupee, color: 'text-emerald-600', bg: 'bg-emerald-50' },
     { label: 'Premium Paid', value: '₹0', icon: ShieldCheck, color: 'text-blue-600', bg: 'bg-blue-50' },
@@ -73,22 +152,89 @@ export const Dashboard: React.FC = () => {
 
   return (
     <div className="space-y-8 animate-in fade-in duration-700">
-       <Weather />
-
       {/* Welcome Section */}
-      
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h2 className="text-3xl font-bold text-neutral-900">Hello, {profile?.fullName.split(' ')[0]}!</h2>
           <p className="text-neutral-500">Here's what's happening with your ErgoShield insurance.</p>
         </div>
-        <div className="flex items-center gap-3 bg-white p-2 rounded-2xl border border-neutral-200 shadow-sm">
-          <div className="px-4 py-2 bg-emerald-50 text-emerald-700 rounded-xl font-bold text-sm">
-            Active Plan: {profile?.subCategory} Plan
+        <div className="flex items-center gap-3">
+          {error && <span className="text-red-500 text-xs font-medium">{error}</span>}
+          <div className="flex items-center gap-3 bg-white p-2 rounded-2xl border border-neutral-200 shadow-sm">
+            <div className="px-4 py-2 bg-emerald-50 text-emerald-700 rounded-xl font-bold text-sm">
+              Active Plan: {profile?.subCategory} Plan
+            </div>
+            <div className="px-4 py-2 bg-neutral-50 text-neutral-600 rounded-xl font-bold text-sm">
+              Risk Score: {profile?.riskScore}/100
+            </div>
           </div>
-          <div className="px-4 py-2 bg-neutral-50 text-neutral-600 rounded-xl font-bold text-sm">
-            Risk Score: {profile?.riskScore}/100
-          </div>
+        </div>
+      </div>
+
+      {/* Weather & Compensation Logic */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-2">
+          <WeatherWidget onWeatherUpdate={setWeather} />
+        </div>
+        
+        <div className="lg:col-span-1">
+          <AnimatePresence mode="wait">
+            {weather?.isRisk ? (
+              <motion.div 
+                key="hazard-active"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="h-full bg-gradient-to-br from-red-600 to-orange-600 rounded-[32px] p-6 text-white shadow-xl shadow-orange-100 relative overflow-hidden flex flex-col justify-center"
+              >
+                <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full -mr-32 -mt-32 blur-3xl" />
+                <div className="relative z-10">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-xl flex items-center justify-center">
+                      <Zap className="text-white fill-white" size={20} />
+                    </div>
+                    <h3 className="text-xl font-black tracking-tight leading-tight">Hazard Active</h3>
+                  </div>
+                  <p className="text-orange-50 text-xs font-medium mb-4">
+                    Severe weather in {weather.city}. Hazard pay active.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <div className="bg-white/20 backdrop-blur-md px-3 py-1.5 rounded-lg text-[10px] font-bold flex items-center gap-1.5">
+                      <TrendingUp size={12} />
+                      +₹25/hr
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            ) : (
+              <motion.div 
+                key="hazard-inactive"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="h-full bg-white rounded-[32px] p-6 text-neutral-900 border border-neutral-100 shadow-sm relative overflow-hidden flex flex-col justify-center"
+              >
+                <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/5 rounded-full -mr-16 -mt-16 blur-2xl" />
+                <div className="relative z-10">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-10 h-10 bg-emerald-50 rounded-xl flex items-center justify-center">
+                      <ShieldCheck className="text-emerald-600" size={20} />
+                    </div>
+                    <h3 className="text-xl font-black tracking-tight">Status: Optimal</h3>
+                  </div>
+                  <p className="text-neutral-500 text-xs font-medium mb-4">
+                    Conditions in {weather?.city || 'your area'} are safe.
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1.5 text-emerald-600 font-bold text-[10px] uppercase tracking-wider">
+                      <CheckCircle2 size={14} />
+                      Monitoring
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </div>
 
@@ -205,55 +351,20 @@ export const Dashboard: React.FC = () => {
                 <p className="text-[10px] font-black uppercase tracking-widest text-emerald-400 mb-1">Valid Until</p>
                 <p className="text-lg font-bold">{new Date(policy.endDate).toLocaleDateString()}</p>
               </div>
+              <div className="col-span-2 mt-4">
+                <button 
+                  onClick={handlePayment}
+                  disabled={loading}
+                  className="w-full bg-white text-emerald-900 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 hover:bg-emerald-50 transition-colors disabled:opacity-50"
+                >
+                  {loading ? <Loader2 className="animate-spin" size={18} /> : <IndianRupee size={18} />}
+                  Pay Weekly Premium (₹{policy.premiumAmount})
+                </button>
+              </div>
             </div>
           </div>
         </div>
       )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-1 gap-8">
-        {/* Weather/Risk Section */}
-        <div className="bg-white p-8 rounded-3xl border border-neutral-100 shadow-sm">
-          <h3 className="text-xl font-bold text-neutral-900 mb-6">Real-time Risk</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            <div className="space-y-6">
-              <div className="flex items-center justify-between p-4 bg-orange-50 rounded-2xl border border-orange-100">
-                <div className="flex items-center gap-3">
-                  <CloudRain className="text-orange-600" />
-                  <div>
-                    <p className="font-bold text-orange-900">Heavy Rain Alert</p>
-                    <p className="text-xs text-orange-700">Expected in 2 hours</p>
-                  </div>
-                </div>
-                <span className="bg-orange-600 text-white text-[10px] font-bold px-2 py-1 rounded-full uppercase">High</span>
-              </div>
-
-              <div className="space-y-4">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-neutral-500 flex items-center gap-2"><Thermometer size={16} /> Temperature</span>
-                  <span className="font-bold text-neutral-900">34°C</span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-neutral-500 flex items-center gap-2"><Wind size={16} /> Air Quality</span>
-                  <span className="font-bold text-emerald-600">Good (42)</span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-neutral-500 flex items-center gap-2"><Clock size={16} /> Peak Hours</span>
-                  <span className="font-bold text-neutral-900">6 PM - 10 PM</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex flex-col justify-center pt-4 md:pt-0 md:pl-8 md:border-l border-neutral-100">
-              <p className="text-sm font-medium text-neutral-700 mb-3">Your Insurance Status</p>
-              <div className="flex items-center gap-2 text-emerald-600 font-bold text-lg">
-                <CheckCircle2 size={24} />
-                Fully Covered
-              </div>
-              <p className="text-neutral-500 text-sm mt-2">ErgoShield is monitoring your location for any disruptions.</p>
-            </div>
-          </div>
-        </div>
-      </div>
 
       {/* Recent Claims */}
       <div className="bg-white rounded-3xl border border-neutral-100 shadow-sm overflow-hidden">

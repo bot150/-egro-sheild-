@@ -5,6 +5,57 @@ import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { useNavigate, Link } from 'react-router-dom';
 import { Shield, Mail, Lock, User, Phone, Chrome, Zap } from 'lucide-react';
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 export const Login: React.FC = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -21,31 +72,49 @@ export const Login: React.FC = () => {
       
       // Check if user exists in firestore
       const userDocRef = doc(db, 'users', user.uid);
-      const userDoc = await getDoc(userDocRef);
+      let userDoc;
+      try {
+        userDoc = await getDoc(userDocRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
+      }
       
-      if (!userDoc.exists()) {
+      if (!userDoc?.exists()) {
         // If Google provides a phone number, check for uniqueness
         if (user.phoneNumber) {
           const phoneIndexRef = doc(db, 'indices', `phone_${user.phoneNumber}`);
-          const phoneSnap = await getDoc(phoneIndexRef);
-          if (phoneSnap.exists()) {
+          let phoneSnap;
+          try {
+            phoneSnap = await getDoc(phoneIndexRef);
+          } catch (err) {
+            handleFirestoreError(err, OperationType.GET, `indices/phone_${user.phoneNumber}`);
+          }
+
+          if (phoneSnap?.exists()) {
             setError('The phone number associated with this Google account is already registered.');
             setLoading(false);
-            // We might want to sign out the user if we don't allow them to proceed
             await auth.signOut();
             return;
           }
-          await setDoc(phoneIndexRef, { ownerId: user.uid, type: 'phone' });
+          try {
+            await setDoc(phoneIndexRef, { ownerId: user.uid, type: 'phone' });
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, `indices/phone_${user.phoneNumber}`);
+          }
         }
 
-        await setDoc(userDocRef, {
-          uid: user.uid,
-          fullName: user.displayName || 'New User',
-          email: user.email,
-          phoneNumber: user.phoneNumber || '',
-          role: 'worker',
-          createdAt: new Date().toISOString(),
-        });
+        try {
+          await setDoc(userDocRef, {
+            uid: user.uid,
+            fullName: user.displayName || 'New User',
+            email: user.email,
+            phoneNumber: user.phoneNumber || '',
+            role: 'worker',
+            createdAt: new Date().toISOString(),
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+        }
         navigate('/onboarding');
       } else {
         navigate('/dashboard');
@@ -187,29 +256,49 @@ export const Signup: React.FC = () => {
       const { user } = await signInWithPopup(auth, provider);
       
       const userDocRef = doc(db, 'users', user.uid);
-      const userDoc = await getDoc(userDocRef);
-      if (!userDoc.exists()) {
+      let userDoc;
+      try {
+        userDoc = await getDoc(userDocRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
+      }
+
+      if (!userDoc?.exists()) {
         // If Google provides a phone number, check for uniqueness
         if (user.phoneNumber) {
           const phoneIndexRef = doc(db, 'indices', `phone_${user.phoneNumber}`);
-          const phoneSnap = await getDoc(phoneIndexRef);
-          if (phoneSnap.exists()) {
+          let phoneSnap;
+          try {
+            phoneSnap = await getDoc(phoneIndexRef);
+          } catch (err) {
+            handleFirestoreError(err, OperationType.GET, `indices/phone_${user.phoneNumber}`);
+          }
+
+          if (phoneSnap?.exists()) {
             setError('The phone number associated with this Google account is already registered.');
             setLoading(false);
             await auth.signOut();
             return;
           }
-          await setDoc(phoneIndexRef, { ownerId: user.uid, type: 'phone' });
+          try {
+            await setDoc(phoneIndexRef, { ownerId: user.uid, type: 'phone' });
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, `indices/phone_${user.phoneNumber}`);
+          }
         }
 
-        await setDoc(userDocRef, {
-          uid: user.uid,
-          fullName: user.displayName || 'New User',
-          email: user.email,
-          phoneNumber: user.phoneNumber || '',
-          role: 'worker',
-          createdAt: new Date().toISOString(),
-        });
+        try {
+          await setDoc(userDocRef, {
+            uid: user.uid,
+            fullName: user.displayName || 'New User',
+            email: user.email,
+            phoneNumber: user.phoneNumber || '',
+            role: 'worker',
+            createdAt: new Date().toISOString(),
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+        }
         navigate('/onboarding');
       } else {
         navigate('/dashboard');
@@ -232,26 +321,39 @@ export const Signup: React.FC = () => {
     try {
       // Check for duplicate phone number
       const phoneIndexRef = doc(db, 'indices', `phone_${formData.phoneNumber}`);
-      const phoneSnap = await getDoc(phoneIndexRef);
+      let phoneSnap;
+      try {
+        phoneSnap = await getDoc(phoneIndexRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `indices/phone_${formData.phoneNumber}`);
+      }
       
-      if (phoneSnap.exists()) {
+      if (phoneSnap?.exists()) {
         setError('This phone number is already registered with another account.');
         setLoading(false);
         return;
       }
 
       const { user } = await createUserWithEmailAndPassword(auth, formData.email, formData.password);
-      await setDoc(doc(db, 'users', user.uid), {
-        uid: user.uid,
-        fullName: formData.fullName,
-        email: formData.email,
-        phoneNumber: formData.phoneNumber,
-        role: 'worker',
-        createdAt: new Date().toISOString(),
-      });
+      try {
+        await setDoc(doc(db, 'users', user.uid), {
+          uid: user.uid,
+          fullName: formData.fullName,
+          email: formData.email,
+          phoneNumber: formData.phoneNumber,
+          role: 'worker',
+          createdAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+      }
 
       // Create index for phone number
-      await setDoc(phoneIndexRef, { ownerId: user.uid, type: 'phone' });
+      try {
+        await setDoc(phoneIndexRef, { ownerId: user.uid, type: 'phone' });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `indices/phone_${formData.phoneNumber}`);
+      }
       
       navigate('/onboarding');
     } catch (err: any) {

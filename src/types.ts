@@ -16,6 +16,7 @@ export interface UserProfile {
   riskScore?: number;
   weeklyPremium?: number;
   onboarded?: boolean;
+  location?: string;
   createdAt: string;
 }
 
@@ -50,4 +51,15 @@ export interface DisruptionEvent {
   location: string;
   timestamp: string;
   affectedCount: number;
+}
+
+export interface WeatherData {
+  city: string;
+  temp: number;
+  condition: string;
+  description: string;
+  humidity: number;
+  windSpeed: number;
+  icon: string;
+  isRisk: boolean;
 }

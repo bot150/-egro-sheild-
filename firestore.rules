@@ -36,16 +36,39 @@ service cloud.firestore {
     function isValidUser(data) {
       return data.keys().hasAll(['uid', 'fullName', 'email', 'role']) &&
              data.uid is string &&
-             data.fullName is string && data.fullName.size() < 100 &&
+             data.fullName is string && data.fullName.size() > 0 && data.fullName.size() < 100 &&
              data.email is string &&
-             data.role in ['worker', 'admin'];
+             data.role in ['worker', 'admin'] &&
+             // Optional fields added during registration/onboarding
+             (!('phoneNumber' in data) || data.phoneNumber is string) &&
+             (!('createdAt' in data) || data.createdAt is string) &&
+             (!('category' in data) || data.category in ['food', 'ecommerce', 'quick_commerce']) &&
+             (!('subCategory' in data) || data.subCategory is string) &&
+             (!('aadharNumber' in data) || (data.aadharNumber is string && data.aadharNumber.size() >= 12)) &&
+             (!('bankAccountNumber' in data) || data.bankAccountNumber is string) &&
+             (!('ifscCode' in data) || data.ifscCode is string) &&
+             (!('age' in data) || (data.age is number && data.age >= 18 && data.age <= 100)) &&
+             (!('riskScore' in data) || data.riskScore is number) &&
+             (!('weeklyPremium' in data) || data.weeklyPremium is number) &&
+             (!('onboarded' in data) || data.onboarded is bool) &&
+             (!('aadharVerified' in data) || data.aadharVerified is bool) &&
+             (!('bankVerified' in data) || data.bankVerified is bool);
+    }
+
+    function isValidPolicy(data) {
+      return data.keys().hasAll(['userId', 'status', 'startDate', 'endDate']) &&
+             data.userId is string &&
+             data.status in ['active', 'expired', 'cancelled'] &&
+             data.startDate is string &&
+             data.endDate is string;
     }
 
     function isValidClaim(data) {
       return data.keys().hasAll(['userId', 'triggerEvent', 'amount', 'status', 'timestamp']) &&
              data.userId is string &&
              data.amount is number &&
-             data.status in ['pending', 'processed', 'flagged'];
+             data.status in ['pending', 'processed', 'flagged'] &&
+             data.timestamp is string;
     }
 
     // ===============================================================
@@ -54,19 +77,19 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
-      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
-      allow update: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
+      allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
     }
 
     match /policies/{policyId} {
       allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || isAdmin());
-      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidPolicy(request.resource.data);
       allow update: if isAdmin();
     }
 
     match /claims/{claimId} {
       allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || isAdmin());
-      allow create: if isAuthenticated() && isValidClaim(request.resource.data) && (request.auth.uid == request.resource.data.userId || isAdmin());
+      allow create: if isAuthenticated() && (request.auth.uid == request.resource.data.userId || isAdmin()) && isValidClaim(request.resource.data);
       allow update: if isAdmin();
     }
 
@@ -76,8 +99,8 @@ service cloud.firestore {
     }
 
     match /indices/{indexId} {
-      // Allow any authenticated user to check if an index exists (for uniqueness validation)
-      allow get: if isAuthenticated();
+      // Allow any user to check if an index exists (for uniqueness validation during registration)
+      allow get: if true;
       // Allow user to create their own index
       allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
       // Allow user to update their own index (if needed)

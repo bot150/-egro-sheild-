@@ -7,6 +7,57 @@ import { auth, db } from '../firebase';
 import { GoogleAuthProvider, signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 const categories = [
   {
     id: 'food',
@@ -62,26 +113,38 @@ export const Landing: React.FC = () => {
       const { user: firebaseUser } = await signInWithPopup(auth, provider);
       
       const userDocRef = doc(db, 'users', firebaseUser.uid);
-      const userDoc = await getDoc(userDocRef);
+      let userDoc;
+      try {
+        userDoc = await getDoc(userDocRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `users/${firebaseUser.uid}`);
+      }
       
-      if (!userDoc.exists()) {
-        await setDoc(userDocRef, {
-          uid: firebaseUser.uid,
-          fullName: firebaseUser.displayName || 'New User',
-          email: firebaseUser.email,
-          phoneNumber: firebaseUser.phoneNumber || '',
-          role: 'worker',
-          createdAt: new Date().toISOString(),
-          category: view === 'register_form' ? categories.find(c => c.options.includes(selectedPlatform!))?.id : null,
-          subCategory: selectedPlatform,
-        });
+      if (!userDoc?.exists()) {
+        try {
+          await setDoc(userDocRef, {
+            uid: firebaseUser.uid,
+            fullName: firebaseUser.displayName || 'New User',
+            email: firebaseUser.email,
+            phoneNumber: firebaseUser.phoneNumber || '',
+            role: 'worker',
+            createdAt: new Date().toISOString(),
+            category: view === 'register_form' ? categories.find(c => c.options.includes(selectedPlatform!))?.id : null,
+            subCategory: selectedPlatform,
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}`);
+        }
         navigate('/onboarding');
       } else {
         navigate('/dashboard');
       }
     } catch (err: any) {
-      console.error(err);
-      setError(err.message);
+      if (err.code === 'auth/operation-not-allowed') {
+        setError('Google sign-in is not enabled in your Firebase project. Please enable it in the Firebase Console.');
+      } else {
+        setError(err.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -95,7 +158,13 @@ export const Landing: React.FC = () => {
       await signInWithEmailAndPassword(auth, email, password);
       navigate('/dashboard');
     } catch (err: any) {
-      setError(err.message);
+      if (err.code === 'auth/operation-not-allowed') {
+        setError('Email/Password sign-in is not enabled in your Firebase project. Please enable it in the Firebase Console.');
+      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        setError('Invalid email or password. Please try again.');
+      } else {
+        setError(err.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -108,42 +177,64 @@ export const Landing: React.FC = () => {
     try {
       // Check for duplicate phone number
       const phoneIndexRef = doc(db, 'indices', `phone_${phoneNumber}`);
-      const phoneSnap = await getDoc(phoneIndexRef);
+      let phoneSnap;
+      try {
+        phoneSnap = await getDoc(phoneIndexRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.GET, `indices/phone_${phoneNumber}`);
+      }
       
-      if (phoneSnap.exists()) {
+      if (phoneSnap?.exists()) {
         setError('This phone number is already registered.');
         setLoading(false);
         return;
       }
 
       const { user: firebaseUser } = await createUserWithEmailAndPassword(auth, email, password);
-      await setDoc(doc(db, 'users', firebaseUser.uid), {
-        uid: firebaseUser.uid,
-        fullName,
-        email,
-        phoneNumber,
-        role: 'worker',
-        createdAt: new Date().toISOString(),
-        category: categories.find(c => c.options.includes(selectedPlatform!))?.id,
-        subCategory: selectedPlatform,
-      });
+      try {
+        await setDoc(doc(db, 'users', firebaseUser.uid), {
+          uid: firebaseUser.uid,
+          fullName,
+          email,
+          phoneNumber,
+          role: 'worker',
+          createdAt: new Date().toISOString(),
+          category: categories.find(c => c.options.includes(selectedPlatform!))?.id,
+          subCategory: selectedPlatform,
+        });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `users/${firebaseUser.uid}`);
+      }
 
-      await setDoc(phoneIndexRef, { ownerId: firebaseUser.uid, type: 'phone' });
+      try {
+        await setDoc(phoneIndexRef, { ownerId: firebaseUser.uid, type: 'phone' });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `indices/phone_${phoneNumber}`);
+      }
       navigate('/onboarding');
     } catch (err: any) {
-      setError(err.message);
+      if (err.code === 'auth/operation-not-allowed') {
+        setError('Email/Password sign-in is not enabled in your Firebase project. Please enable it in the Firebase Console.');
+      } else {
+        setError(err.message);
+      }
     } finally {
       setLoading(false);
     }
   };
 
   const handleSignOut = async () => {
+    setLoading(true);
     try {
+      // Set view first so it's ready when the component re-renders after sign out
+      setView('login_methods');
       await auth.signOut();
-      setView('initial');
       navigate('/');
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error signing out:', err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -170,26 +261,31 @@ export const Landing: React.FC = () => {
               <div className="flex items-center gap-3 md:gap-6">
                 <button 
                   onClick={() => navigate('/dashboard')}
-                  className="bg-neutral-900 text-white px-4 md:px-8 py-2 md:py-3 rounded-xl md:rounded-2xl font-bold text-xs md:text-sm hover:bg-emerald-600 transition-all shadow-xl shadow-neutral-200"
+                  className="bg-neutral-900 text-white px-4 md:px-8 py-2 md:py-3 rounded-xl md:rounded-2xl font-bold text-xs md:text-sm hover:bg-emerald-600 transition-all shadow-xl shadow-neutral-200 cursor-pointer"
                 >
                   Dashboard
                 </button>
                 <button 
                   onClick={handleSignOut}
-                  className="hidden sm:block text-[10px] font-black text-neutral-400 uppercase tracking-widest hover:text-red-600 transition-colors"
+                  className="text-[10px] font-black text-neutral-400 uppercase tracking-widest hover:text-red-600 transition-colors cursor-pointer"
                 >
                   Sign Out
                 </button>
               </div>
             ) : (
               <>
-                <Link to="/login" className="hidden sm:block text-[10px] font-black text-neutral-400 uppercase tracking-widest hover:text-emerald-600 transition-colors">Sign In</Link>
-                <Link 
-                  to="/signup" 
-                  className="bg-emerald-600 text-white px-4 md:px-8 py-2 md:py-3 rounded-xl md:rounded-2xl font-bold text-xs md:text-sm hover:bg-neutral-900 shadow-xl shadow-emerald-200 transition-all"
+                <button 
+                  onClick={() => setView('login_methods')}
+                  className="hidden sm:block text-[10px] font-black text-neutral-400 uppercase tracking-widest hover:text-emerald-600 transition-colors cursor-pointer"
+                >
+                  Sign In
+                </button>
+                <button 
+                  onClick={() => setView('register_platform')}
+                  className="bg-emerald-600 text-white px-4 md:px-8 py-2 md:py-3 rounded-xl md:rounded-2xl font-bold text-xs md:text-sm hover:bg-neutral-900 shadow-xl shadow-emerald-200 transition-all cursor-pointer"
                 >
                   Get Started
-                </Link>
+                </button>
               </>
             )}
           </div>
@@ -218,7 +314,7 @@ export const Landing: React.FC = () => {
               The Future of Gig Work Security
             </motion.div>
             
-            <h1 className="text-4xl sm:text-5xl md:text-8xl font-display uppercase leading-tight text-neutral-900 mb-6 md:mb-10 tracking-tighter">
+            <h1 className="text-6xl sm:text-7xl md:text-[12rem] font-display uppercase leading-[0.85] text-neutral-900 mb-6 md:mb-10 tracking-tighter">
               Your Hustle <br />
               <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-600 to-emerald-400">Our Shield.</span>
             </h1>
@@ -267,16 +363,16 @@ export const Landing: React.FC = () => {
                 </div>
                 <h2 className="text-3xl font-black text-neutral-900 mb-4">Welcome Back!</h2>
                 <p className="text-neutral-500 mb-8 font-medium">You're already protected. Head over to your dashboard to manage your shield.</p>
-                <div className="flex flex-col gap-3">
-                  <Link 
-                    to="/dashboard" 
-                    className="w-full bg-emerald-600 text-white px-10 py-5 rounded-2xl font-bold text-lg shadow-xl shadow-emerald-200 hover:bg-emerald-700 hover:-translate-y-1 transition-all flex items-center justify-center gap-2"
+                <div className="flex flex-col gap-3 relative z-20">
+                  <button 
+                    onClick={() => navigate('/dashboard')}
+                    className="w-full bg-emerald-600 text-white px-10 py-5 rounded-2xl font-bold text-lg shadow-xl shadow-emerald-200 hover:bg-emerald-700 hover:-translate-y-1 transition-all flex items-center justify-center gap-2 cursor-pointer"
                   >
                     Go to Dashboard <ChevronRight size={20} />
-                  </Link>
+                  </button>
                   <button 
                     onClick={handleSignOut}
-                    className="w-full bg-white border-2 border-neutral-100 text-neutral-600 px-10 py-4 rounded-2xl font-bold text-sm hover:border-red-200 hover:text-red-600 transition-all"
+                    className="w-full bg-white border-2 border-neutral-100 text-neutral-600 px-10 py-4 rounded-2xl font-bold text-sm hover:border-red-200 hover:text-red-600 transition-all cursor-pointer"
                   >
                     Sign Out / Switch Account
                   </button>
@@ -571,6 +667,22 @@ export const Landing: React.FC = () => {
               </div>
             )}
           </motion.div>
+        </div>
+      </section>
+
+      {/* Trust Section */}
+      <section className="py-12 border-y border-neutral-100 bg-white overflow-hidden">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-8 opacity-40 grayscale">
+            <span className="text-[10px] font-black uppercase tracking-[0.4em] text-neutral-400 mb-4 md:mb-0">Trusted by workers from</span>
+            <div className="flex flex-wrap justify-center gap-8 md:gap-16">
+              <div className="flex items-center gap-2 font-display text-2xl">SWIGGY</div>
+              <div className="flex items-center gap-2 font-display text-2xl">ZOMATO</div>
+              <div className="flex items-center gap-2 font-display text-2xl">AMAZON</div>
+              <div className="flex items-center gap-2 font-display text-2xl">ZEPTO</div>
+              <div className="flex items-center gap-2 font-display text-2xl">BLINKIT</div>
+            </div>
+          </div>
         </div>
       </section>
 

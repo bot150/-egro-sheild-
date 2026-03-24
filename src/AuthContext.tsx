@@ -18,11 +18,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let unsubProfile: (() => void) | null = null;
+
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
+      
+      // Cleanup previous profile listener if it exists
+      if (unsubProfile) {
+        unsubProfile();
+        unsubProfile = null;
+      }
+
       if (firebaseUser) {
         const userDoc = doc(db, 'users', firebaseUser.uid);
-        const unsubProfile = onSnapshot(userDoc, (docSnap) => {
+        unsubProfile = onSnapshot(userDoc, (docSnap) => {
           if (docSnap.exists()) {
             setProfile(docSnap.data() as UserProfile);
           }
@@ -31,14 +40,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           console.error("Firestore Error: ", error);
           setLoading(false);
         });
-        return () => unsubProfile();
       } else {
         setProfile(null);
         setLoading(false);
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      if (unsubProfile) unsubProfile();
+    };
   }, []);
 
   return (
