@@ -110,28 +110,32 @@ export const InsurancePage: React.FC = () => {
     setSuccessMessage(null);
 
     try {
-      // 1. Get Razorpay Key & Create Order in parallel
-      const [keyRes, orderRes] = await Promise.all([
-        fetch('/api/payment/key').then(r => r.json()),
-        fetch('/api/payment/order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            amount: plan.premium,
-            receipt: `rcpt_${(profile?.uid || 'g').slice(0, 8)}_${Date.now()}`,
-          }),
-        })
-      ]);
+      // 1. Get Razorpay Key
+      const keyRes = await fetch('/api/payment/key');
+      const keyData = await keyRes.json();
 
-      if (keyRes.error) {
-        setError(keyRes.error);
+      if (!keyRes.ok || keyData.error) {
+        setError(keyData.error || 'Razorpay key not configured. Please add RAZORPAY_KEY_ID to your environment.');
         setLoading(false);
         setPayingPlanId(null);
         return;
       }
-      const { key } = keyRes;
+      const { key } = keyData;
 
-      if (!orderRes.ok) throw new Error('Failed to create payment order');
+      // 2. Create Order
+      const orderRes = await fetch('/api/payment/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: plan.premium,
+          receipt: `rcpt_${(profile?.uid || 'g').slice(0, 8)}_${Date.now()}`,
+        }),
+      });
+
+      if (!orderRes.ok) {
+        const errData = await orderRes.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to create payment order. Please check your Razorpay credentials.');
+      }
       const order = await orderRes.json();
 
       // 2. Open Razorpay Checkout
